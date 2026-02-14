@@ -26,12 +26,14 @@
 
 #include "allocator_type.h"
 #include "base/atomic.h"
+#include "base/globals.h"
 #include "base/histogram.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/runtime_debug.h"
 #include "base/safe_map.h"
 #include "base/time_utils.h"
+#include "gc/accounting/bitmap.h"
 #include "gc/collector/gc_type.h"
 #include "gc/collector/iteration.h"
 #include "gc/collector_type.h"
@@ -659,6 +661,10 @@ class Heap {
 
   accounting::ObjectStack* GetLiveStack() REQUIRES_SHARED(Locks::heap_bitmap_lock_) {
     return live_stack_.get();
+  }
+
+  accounting::MemoryRangeBitmap<kPageSize>* GetFreePageBitmap() {
+    return free_page_bitmap_.get();
   }
 
   void PreZygoteFork() NO_THREAD_SAFETY_ANALYSIS;
@@ -1497,6 +1503,10 @@ class Heap {
   bool verify_post_gc_rosalloc_;
   const bool gc_stress_mode_;
 
+public:
+  bool do_mark;
+private:
+
   // RAII that temporarily disables the rosalloc verification during
   // the zygote fork.
   class ScopedDisableRosAllocVerification {
@@ -1530,6 +1540,11 @@ class Heap {
   std::unique_ptr<accounting::HeapBitmap> live_bitmap_ GUARDED_BY(Locks::heap_bitmap_lock_);
   // A bitmap that is set corresponding to the marked objects in the current GC cycle.
   std::unique_ptr<accounting::HeapBitmap> mark_bitmap_ GUARDED_BY(Locks::heap_bitmap_lock_);
+
+  // yizhe: dont need to be guarded by heap_bitmap_lock_
+  // A bitmap that is set corresponding to the free pages in the heap.
+  // 0: used, 1: free
+  std::unique_ptr<accounting::MemoryRangeBitmap<kPageSize>> free_page_bitmap_;
 
   // Mark stack that we reuse to avoid re-allocating the mark stack.
   std::unique_ptr<accounting::ObjectStack> mark_stack_;

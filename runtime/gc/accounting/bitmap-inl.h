@@ -145,6 +145,85 @@ inline bool Bitmap::ModifyBit(uintptr_t bit_index) {
   return (old_word & word_mask) != 0;
 }
 
+// Set or clear all bits in address range [start_addr, end_addr).
+// kSetBit=true sets bits to 1, kSetBit=false clears bits to 0.
+// Addresses must be in [CoverBegin(), CoverEnd()). Intervals are half-open [start, end).
+template<size_t kAlignment>
+template<bool kSetBit>
+void MemoryRangeBitmap<kAlignment>::ModifyBitRange(uintptr_t start_addr, uintptr_t end_addr) {
+  DCHECK_LE(start_addr, end_addr);
+  DCHECK(HasAddress(start_addr)) << CoverBegin() << " <= " << start_addr << " < " << CoverEnd();
+  DCHECK_LE(end_addr, CoverEnd()) << "end_addr " << end_addr << " > CoverEnd() " << CoverEnd();
+  if (end_addr > CoverBegin()) {
+    DCHECK(HasAddress(end_addr - 1) || end_addr == CoverEnd())
+        << CoverBegin() << " <= " << (end_addr - 1) << " < " << CoverEnd();
+  }
+
+  if (start_addr >= end_addr) {
+    return;
+  }
+
+  // Align to kAlignment boundaries
+  uintptr_t aligned_start = (start_addr / kAlignment) * kAlignment;
+  uintptr_t aligned_end = ((end_addr + kAlignment - 1) / kAlignment) * kAlignment;
+
+  if (aligned_start >= aligned_end) {
+    return;
+  }
+
+  // Convert aligned addresses to bit indices
+  uintptr_t start_bit_index = BitIndexFromAddr(aligned_start);
+  uintptr_t end_bit_index = (aligned_end == CoverEnd()) 
+      ? BitmapSize() 
+      : BitIndexFromAddr(aligned_end);
+
+  uintptr_t* words = Begin();
+  constexpr size_t kBitsPerWord = Bitmap::kBitsPerBitmapWord;
+
+  // Convert to word-level indices
+  uintptr_t start_word_index = Bitmap::BitIndexToWordIndex(start_bit_index);
+  uintptr_t end_word_index = Bitmap::BitIndexToWordIndex(end_bit_index);
+  size_t start_bit_in_word = start_bit_index % kBitsPerWord;
+  size_t end_bit_in_word = end_bit_index % kBitsPerWord;
+
+  if (start_word_index == end_word_index) {
+    // Single word: modify bits [start_bit_in_word, end_bit_in_word)
+    uintptr_t mask = ((static_cast<uintptr_t>(1) << end_bit_in_word) - 1) &
+                     ~((static_cast<uintptr_t>(1) << start_bit_in_word) - 1);
+    if (kSetBit) {
+      words[start_word_index] |= mask;
+    } else {
+      words[start_word_index] &= ~mask;
+    }
+  } else {
+    // Multiple words: handle first partial word
+    if (start_bit_in_word != 0) {
+      uintptr_t mask = ~((static_cast<uintptr_t>(1) << start_bit_in_word) - 1);
+      if (kSetBit) {
+        words[start_word_index] |= mask;
+      } else {
+        words[start_word_index] &= ~mask;
+      }
+      start_word_index++;
+    }
+
+    // Handle full words
+    for (uintptr_t i = start_word_index; i < end_word_index; ++i) {
+      words[i] = kSetBit ? static_cast<uintptr_t>(-1) : 0;
+    }
+
+    // Handle last partial word
+    if (end_bit_in_word != 0) {
+      uintptr_t mask = (static_cast<uintptr_t>(1) << end_bit_in_word) - 1;
+      if (kSetBit) {
+        words[end_word_index] |= mask;
+      } else {
+        words[end_word_index] &= ~mask;
+      }
+    }
+  }
+}
+
 }  // namespace accounting
 }  // namespace gc
 }  // namespace art

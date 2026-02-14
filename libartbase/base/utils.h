@@ -171,6 +171,40 @@ bool IsAddressKnownBackedByFileOrShared(const void* addr);
 // Returns the number of threads running.
 int GetTaskCount();
 
+// Global variable to store the minimum heap address base.
+// This is set during heap creation and can be used as the base address
+// for page bitmap operations.
+extern uintptr_t g_min_heap_address_base;
+
+// Set the minimum heap address base. Should be called during heap creation.
+// @param base The minimum heap address base to set
+void SetMinHeapAddressBase(uintptr_t base);
+
+// Get the minimum heap address base.
+// @return The current minimum heap address base, or 0 if not set
+uintptr_t GetMinHeapAddressBase();
+
+// Initialize page bitmap for the current process via init_page_bitmap syscall.
+// @param base Base address of the memory region
+// @param page_number Number of pages
+// @param page_size Size of each page in bytes
+// @return 0 on success, -1 on error (errno is set)
+int InitPageBitmap(uintptr_t base, size_t page_number, size_t page_size);
+
+// @mode 0: free bitmap
+//       1: zero bitmap (remove all pages)
+//       2: clear bits in [from_page_id, to_page_id]
+//       3: set bits in [from_page_id, to_page_id]
+//       other: dump page bitmap to dmesg
+// @from_page_id, @to_page_id: closed interval [from_page_id, to_page_id]
+//       (used for mode 2 and 3; ignored for mode 0 and 1)
+int ModPageBitmap(unsigned int mode, size_t from_page_id, size_t to_page_id);
+
+inline size_t CalculatePageId(uintptr_t base, uintptr_t addr) {
+  DCHECK_GE(addr, base);
+  return (addr - base) / kPageSize;
+}
+
 }  // namespace art
 
 #endif  // ART_LIBARTBASE_BASE_UTILS_H_

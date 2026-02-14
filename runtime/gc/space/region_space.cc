@@ -484,6 +484,10 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
   uint64_t start_time = NanoTime();
   for (const auto &iter : madvise_list) {
     ZeroAndProtectRegion(iter.first, iter.second);
+    // yizhe: clear the page bitmap in kernel (mode=2: clear bits in [from_page_id, to_page_id])
+    size_t start_page = CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(iter.first));
+    size_t end_page = CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(iter.second) - 1);
+    ModPageBitmap(2, start_page, end_page);
   }
   madvise_time_ += NanoTime() - start_time;
 
@@ -1046,6 +1050,11 @@ RegionSpace::Region* RegionSpace::AllocateRegion(bool for_evac) {
         // Move the cyclic allocation region marker to the region
         // following the one that was just allocated.
         cyclic_alloc_region_index_ = (region_index + 1) % num_regions_;
+      }
+
+      // yizhe: set the region space page bitmap in kernel
+      for (size_t j = CalculatePageId(GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(r->Begin())); j <= CalculatePageId(GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(r->End()) - 1); j++) {
+        ModPageBitmap(3, j, j);
       }
       return r;
     }

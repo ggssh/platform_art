@@ -448,6 +448,12 @@ inline mirror::Object* RegionSpace::AllocLargeInRange(size_t begin,
         // Return the index to the region next to the allocated large region via `next_region`.
         *next_region = right;
       }
+      // yizhe: set the region space page bitmap in kernel for large object
+      uint8_t* large_obj_begin = first_reg->Begin();
+      uint8_t* large_obj_end = large_obj_begin + allocated;
+      for (size_t j = CalculatePageId(GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(large_obj_begin)); j <= CalculatePageId(GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(large_obj_end) - 1); j++) {
+        ModPageBitmap(3, j, j);
+      }
       return large_region;
     } else {
       // `right` points to the non-free region. Start with the one after it.

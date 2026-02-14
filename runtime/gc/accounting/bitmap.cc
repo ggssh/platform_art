@@ -98,6 +98,7 @@ MemoryRangeBitmap<kAlignment>* MemoryRangeBitmap<kAlignment>::CreateFromMemMap(
 
 template class MemoryRangeBitmap<CardTable::kCardSize>;
 template class MemoryRangeBitmap<jit::kJitCodeAccountingBytes>;
+template class MemoryRangeBitmap<kPageSize>;
 
 }  // namespace accounting
 }  // namespace gc

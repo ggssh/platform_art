@@ -1241,7 +1241,8 @@ void ZeroAndReleasePages(void* address, size_t length) {
 #ifdef _WIN32
     LOG(WARNING) << "ZeroAndReleasePages does not madvise on Windows.";
 #else
-    CHECK_NE(madvise(page_begin, page_end - page_begin, MADV_DONTNEED), -1) << "madvise failed";
+    // CHECK_NE(madvise(page_begin, page_end - page_begin, MADV_DONTNEED), -1) << "madvise failed";
+    std::fill(page_begin, page_end, 0);
 #endif
     std::fill(page_end, mem_end, 0);
   }

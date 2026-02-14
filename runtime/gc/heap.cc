@@ -18,6 +18,7 @@
 
 #include <limits>
 #include "android-base/thread_annotations.h"
+#include "gc/collector/gc_type.h"
 #if defined(__BIONIC__) || defined(__GLIBC__)
 #include <malloc.h>  // For mallinfo()
 #endif
@@ -109,6 +110,9 @@
 #include "thread_list.h"
 #include "verify_object-inl.h"
 #include "well_known_classes.h"
+#include "base/globals.h"
+#include "gc/accounting/bitmap.h"
+#include "gc/accounting/bitmap-inl.h"
 
 namespace art {
 
@@ -691,9 +695,19 @@ Heap::Heap(size_t initial_size,
   // Start at 4 KB, we can be sure there are no spaces mapped this low since the address range is
   // reserved by the kernel.
   static constexpr size_t kMinHeapAddress = 4 * KB;
+  // Set the global minimum heap address base for use in page bitmap operations.
+  SetMinHeapAddressBase(kMinHeapAddress);
   card_table_.reset(accounting::CardTable::Create(reinterpret_cast<uint8_t*>(kMinHeapAddress),
                                                   4 * GB - kMinHeapAddress));
   CHECK(card_table_.get() != nullptr) << "Failed to create card table";
+
+  free_page_bitmap_.reset(accounting::MemoryRangeBitmap<kPageSize>::Create("free page bitmap", art::GetMinHeapAddressBase(), 4 * GB));
+  CHECK(free_page_bitmap_.get() != nullptr) << "Failed to create free page bitmap";
+  // for (size_t i = 0; i < free_page_bitmap_->BitmapSize(); i++) {
+  //   free_page_bitmap_->SetBit(i);
+  // }
+  do_mark = false;
+
   if (foreground_collector_type_ == kCollectorTypeCC && kUseTableLookupReadBarrier) {
     rb_table_.reset(new accounting::ReadBarrierTable());
     DCHECK(rb_table_->IsAllCleared());
@@ -823,6 +837,17 @@ Heap::Heap(size_t initial_size,
   if (is_running_on_memory_tool_ || gc_stress_mode_) {
     instrumentation->InstrumentQuickAllocEntryPoints();
   }
+
+  // Initialize page bitmap for the current process.
+  int ret = InitPageBitmap(art::GetMinHeapAddressBase(), (4 * GB - art::GetMinHeapAddressBase()) / kPageSize, kPageSize);
+  // int ret = -1;
+  if (ret != 0) {
+    LOG(INFO) << "YYZ: Failed to initialize page bitmap, error: " << strerror(errno)
+               << ", pid: " << getpid();
+  } else {
+    LOG(INFO) << "YYZ: Initialized page bitmap successfully, pid: " << getpid();
+  }
+
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
     LOG(INFO) << "Heap() exiting";
   }
@@ -3632,7 +3657,9 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
     grow_bytes = std::min(delta, static_cast<uint64_t>(max_free_));
     grow_bytes = std::max(grow_bytes, static_cast<uint64_t>(min_free_));
     target_size = bytes_allocated + static_cast<uint64_t>(grow_bytes * multiplier);
-    next_gc_type_ = collector::kGcTypeSticky;
+    // next_gc_type_ = collector::kGcTypeSticky;
+    collector::GcType non_sticky_gc_type = NonStickyGcType();
+    next_gc_type_ = non_sticky_gc_type;
   } else {
     collector::GcType non_sticky_gc_type = NonStickyGcType();
     // Find what the next non sticky collector will be.
@@ -4654,9 +4681,53 @@ static uint32_t GetPseudoRandomFromUid() {
 }
 
 void Heap::PostForkChildAction(Thread* self) {
+  // yizhe: when using Concurrent Copying GC, the kDefaultLargeObjectSpaceType is kFreeList
+  // if (kDefaultLargeObjectSpaceType == space::LargeObjectSpaceType::kFreeList) {
+  //   LOG(INFO) << "YYZ: FreeList LargeObjectSpace";
+  // } else {
+  //   LOG(INFO) << "YYZ: LargeObjectMapSpace";
+  // }
   uint32_t starting_gc_num = GetCurrentGcNum();
   uint64_t last_adj_time = NanoTime();
   next_gc_type_ = NonStickyGcType();  // Always start with a full gc.
+
+  bool init_failed = false;
+  int syscall_ret = InitPageBitmap(art::GetMinHeapAddressBase(), 
+                         (4 * GB - art::GetMinHeapAddressBase()) / kPageSize, 
+                         kPageSize);
+  // int syscall_ret = -1;
+  if (syscall_ret != 0) {
+    LOG(INFO) << "YYZ: Failed to initialize page bitmap in child, error: " << strerror(errno)<< ", pid: " << getpid();
+    init_failed = true;
+  } else {
+    LOG(INFO) << "YYZ: Initialized page bitmap in child successfully, pid: " << getpid();
+  }
+
+  if (init_failed) {
+    LOG(INFO) << "YYZ: Skipping region_space page removal for failed page bitmap initialization";
+  } else if (region_space_ != nullptr) {
+    uint8_t* region_begin = region_space_->Begin();
+    uint8_t* region_limit = region_space_->Limit();
+    uintptr_t base = art::GetMinHeapAddressBase();
+    
+    if (region_begin != nullptr && region_limit > region_begin) {
+      size_t region_start_page = art::CalculatePageId(base, reinterpret_cast<uintptr_t>(region_begin));
+      size_t region_end_page = art::CalculatePageId(base, reinterpret_cast<uintptr_t>(region_limit - 1));
+      
+      LOG(INFO) << "YYZ: Removing region_space pages [" << region_start_page 
+                << ", " << region_end_page << "], base=" << std::hex << base
+                << ", begin=" << reinterpret_cast<uintptr_t>(region_begin)
+                << ", limit=" << reinterpret_cast<uintptr_t>(region_limit);
+      
+      // Remove pages in batch (mode=2: clear bits in [from_page_id, to_page_id])
+      int ret = ModPageBitmap(2, region_start_page, region_end_page);
+      if (ret != 0) {
+        LOG(WARNING) << "YYZ: Failed to remove region_space pages [" 
+                     << region_start_page << ", " << region_end_page 
+                     << "], error: " << strerror(errno);
+      }
+    }
+  }
 
 #if defined(__BIONIC__) && defined(ART_TARGET)
   uffd_ = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);

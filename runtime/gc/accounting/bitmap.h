@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "base/locks.h"
+#include "base/macros.h"
 #include "base/mem_map.h"
 #include "runtime_globals.h"
 
@@ -60,6 +61,8 @@ class Bitmap {
   ALWAYS_INLINE bool SetBit(size_t bit_index) {
     return ModifyBit<true>(bit_index);
   }
+
+  ALWAYS_INLINE void SetBitRange(uintptr_t begin_addr, uintptr_t end_addr);
 
   ALWAYS_INLINE bool ClearBit(size_t bit_index) {
     return ModifyBit<false>(bit_index);
@@ -174,6 +177,15 @@ class MemoryRangeBitmap : public Bitmap {
   ALWAYS_INLINE bool AtomicTestAndSet(size_t addr) {
     return AtomicTestAndSetBit(BitIndexFromAddr(addr));
   }
+  
+  // Convenience methods
+  void SetBitRange(uintptr_t start_addr, uintptr_t end_addr) {
+    ModifyBitRange<true>(start_addr, end_addr);
+  }
+  
+  void ClearBitRange(uintptr_t start_addr, uintptr_t end_addr) {
+    ModifyBitRange<false>(start_addr, end_addr);
+  }
 
  private:
   MemoryRangeBitmap(MemMap&& mem_map, uintptr_t begin, size_t num_bits)
@@ -185,6 +197,12 @@ class MemoryRangeBitmap : public Bitmap {
   uintptr_t const cover_end_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(MemoryRangeBitmap);
+
+  // Modify all bits in the address range [start_addr, end_addr).
+  // If kSetBit is true, sets all bits to 1; otherwise clears all bits to 0.
+  // This is more efficient than calling Set()/Clear() multiple times for consecutive addresses.
+  template<bool kSetBit>
+  void ModifyBitRange(uintptr_t start_addr, uintptr_t end_addr);
 };
 
 }  // namespace accounting

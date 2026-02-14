@@ -24,6 +24,8 @@
 #include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
+#include "base/time_utils.h"
+#include "base/utils.h"
 #include "class_root-inl.h"
 #include "debugger.h"
 #include "gc/accounting/atomic_stack.h"
@@ -46,6 +48,7 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "well_known_classes.h"
+#include "gc/accounting/bitmap-inl.h"
 
 namespace art {
 namespace gc {
@@ -218,6 +221,7 @@ void ConcurrentCopying::RunPhases() {
     // need to compute live_bytes.
     if (use_generational_cc_ && !young_gen_ && !force_evacuate_all_) {
       MarkingPhase();
+      heap_->do_mark = true;
     }
   }
   if (kUseBakerReadBarrier && kGrayDirtyImmuneObjects) {
@@ -233,6 +237,7 @@ void ConcurrentCopying::RunPhases() {
   {
     ReaderMutexLock mu(self, *Locks::mutator_lock_);
     CopyingPhase();
+    heap_->do_mark = false;
   }
   // Verify no from space refs. This causes a pause.
   if (kEnableNoFromSpaceRefsVerification) {
@@ -1177,14 +1182,16 @@ void ConcurrentCopying::AddLiveBytesAndScanRef(mirror::Object* ref) {
   size_t obj_region_idx = static_cast<size_t>(-1);
   if (LIKELY(region_space_->HasAddress(ref))) {
     obj_region_idx = region_space_->RegionIdxForRefUnchecked(ref);
+    size_t obj_size = ref->SizeOf<kDefaultVerifyFlags>();
+    size_t alloc_size = RoundUp(obj_size, space::RegionSpace::kAlignment);
     // Add live bytes to the corresponding region
     if (!region_space_->IsRegionNewlyAllocated(obj_region_idx)) {
       // Newly Allocated regions are always chosen for evacuation. So no need
       // to update live_bytes_.
-      size_t obj_size = ref->SizeOf<kDefaultVerifyFlags>();
-      size_t alloc_size = RoundUp(obj_size, space::RegionSpace::kAlignment);
       region_space_->AddLiveBytes(ref, alloc_size);
     }
+    auto page_bitmap = heap_->GetFreePageBitmap();
+    page_bitmap->ClearBitRange(reinterpret_cast<uintptr_t>(ref), reinterpret_cast<uintptr_t>(ref) + alloc_size);
   }
   ComputeLiveBytesAndMarkRefFieldsVisitor</*kHandleInterRegionRefs*/ true>
       visitor(this, obj_region_idx);
@@ -1390,6 +1397,8 @@ void ConcurrentCopying::MarkingPhase() {
   if (kIsDebugBuild) {
     region_space_->AssertAllRegionLiveBytesZeroOrCleared();
   }
+  auto free_page_bitmap = heap_->GetFreePageBitmap();
+  free_page_bitmap->SetBitRange(reinterpret_cast<uintptr_t>(region_space_->Begin()), reinterpret_cast<uintptr_t>(region_space_->Limit()));
   // Scan immune spaces
   {
     TimingLogger::ScopedTiming split2("ScanImmuneSpaces", GetTimings());
@@ -1450,6 +1459,48 @@ void ConcurrentCopying::ScanDirtyObject(mirror::Object* obj) {
 
 // Concurrently mark roots that are guarded by read barriers and process the mark stack.
 void ConcurrentCopying::CopyingPhase() {
+  if (heap_->do_mark == true) {
+    const uint64_t do_mark_start_ns = NanoTime();
+    Thread* self = Thread::Current();
+    auto free_page_bitmap = heap_->GetFreePageBitmap();
+    ReaderMutexLock test_mu(self, *Locks::heap_bitmap_lock_);
+    auto test_live_stack = heap_->GetLiveStack();
+    auto objects = test_live_stack->Begin();
+    size_t count = test_live_stack->Size();
+    for (size_t i = 0; i < count; i++) {
+      auto obj = objects[i].AsMirrorPtr();
+      if (obj == nullptr) {
+        continue;
+      }
+      auto obj_size = obj->SizeOf<kDefaultVerifyFlags>();
+      auto alloc_size = RoundUp(obj_size, gc::space::RegionSpace::kAlignment);
+      free_page_bitmap->ClearBitRange(reinterpret_cast<uintptr_t>(obj), reinterpret_cast<uintptr_t>(obj) + alloc_size);
+    }
+
+    int page_count = 0;
+    LOG(INFO) << "GC MarkingPhase: region_space_begin=" << reinterpret_cast<uintptr_t>(region_space_->Begin()) << ", region_space_end=" << reinterpret_cast<uintptr_t>(region_space_->End()) << ", pageidx_begin=" << CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(region_space_->Begin())) << ", pageidx_end=" << CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(region_space_->End() - 1));
+    
+    uintptr_t base = art::GetMinHeapAddressBase();
+    for (size_t i = CalculatePageId(base, reinterpret_cast<uintptr_t>(region_space_->Begin()));
+         i <= CalculatePageId(base, reinterpret_cast<uintptr_t>(region_space_->End() - 1));
+         i++) {
+      // Only process pages that belong to from-space regions.
+      uintptr_t page_addr = base + i * kPageSize;
+      if (!region_space_->IsInFromSpace(reinterpret_cast<mirror::Object*>(page_addr))) {
+        continue;
+      }
+      if (heap_->GetFreePageBitmap()->TestBit(i)) {
+        // yizhe: remove the free page from the page bitmap in kernel
+        ModPageBitmap(2, i, i);
+        page_count++;
+      }
+    }
+    const uint64_t do_mark_elapsed_ns = NanoTime() - do_mark_start_ns;
+    LOG(INFO) << "GC MarkingPhase: garbage_page_count=" << page_count
+              << ", total_page_count=" << heap_->GetFreePageBitmap()->BitmapSize()
+              << ", do_mark_elapsed_ms=" << (do_mark_elapsed_ns / 1000 / 1000);
+  }
+
   TimingLogger::ScopedTiming split("CopyingPhase", GetTimings());
   if (kVerboseMode) {
     LOG(INFO) << "GC CopyingPhase";
@@ -3498,6 +3549,10 @@ mirror::Object* ConcurrentCopying::Copy(Thread* const self,
     }
   }
   DCHECK(to_ref != nullptr);
+  // yizhe: set the page bitmap in kernel
+  // for (size_t i = CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(to_ref)); i <= CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(to_ref) + bytes_allocated - 1); i++) {
+  //   ModPageBitmap(3, i, i);
+  // }
 
   // Copy the object excluding the lock word since that is handled in the loop.
   to_ref->SetClass(klass);

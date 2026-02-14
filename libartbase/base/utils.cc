@@ -17,6 +17,7 @@
 #include "utils.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -51,6 +52,13 @@
 #include <linux/unistd.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+// Define custom system call numbers if not already defined by the kernel headers.
+#ifndef __NR_init_page_bitmap
+#define __NR_init_page_bitmap 1081
+#endif
+#ifndef __NR_mod_page_bitmap
+#define __NR_mod_page_bitmap 1082
+#endif
 #endif
 
 #if defined(_WIN32)
@@ -392,6 +400,47 @@ int GetTaskCount() {
   }
   closedir(directory);
   return count;
+}
+
+int InitPageBitmap(uintptr_t base, size_t page_number, size_t page_size) {
+#if defined(__linux__) && defined(__NR_init_page_bitmap)
+  long result = syscall(__NR_init_page_bitmap, base, page_number, page_size);
+  if (result < 0) {
+    return -1;
+  }
+  // yizhe: add this to set all pages to be used (needless)
+  result = ModPageBitmap(3, 0, page_number - 1);
+  if (result < 0) {
+    return -1;
+  }
+  return 0;
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+int ModPageBitmap(unsigned int mode, size_t from_page_id, size_t to_page_id) {
+#if defined(__linux__) && defined(__NR_mod_page_bitmap)
+  long result = syscall(__NR_mod_page_bitmap, mode, from_page_id, to_page_id);
+  if (result < 0) {
+    return -1;
+  }
+  return 0;
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+uintptr_t g_min_heap_address_base = 0;
+
+void SetMinHeapAddressBase(uintptr_t base) {
+  g_min_heap_address_base = base;
+}
+
+uintptr_t GetMinHeapAddressBase() {
+  return g_min_heap_address_base;
 }
 
 }  // namespace art
