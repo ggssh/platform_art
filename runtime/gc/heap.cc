@@ -30,6 +30,7 @@
 #include <random>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <vector>
 
 #include "android-base/stringprintf.h"
@@ -4708,24 +4709,20 @@ void Heap::PostForkChildAction(Thread* self) {
   } else if (region_space_ != nullptr) {
     uint8_t* region_begin = region_space_->Begin();
     uint8_t* region_limit = region_space_->Limit();
-    uintptr_t base = art::GetMinHeapAddressBase();
-    
+
     if (region_begin != nullptr && region_limit > region_begin) {
-      size_t region_start_page = art::CalculatePageId(base, reinterpret_cast<uintptr_t>(region_begin));
-      size_t region_end_page = art::CalculatePageId(base, reinterpret_cast<uintptr_t>(region_limit - 1));
-      
-      LOG(INFO) << "YYZ: Removing region_space pages [" << region_start_page 
-                << ", " << region_end_page << "], base=" << std::hex << base
-                << ", begin=" << reinterpret_cast<uintptr_t>(region_begin)
-                << ", limit=" << reinterpret_cast<uintptr_t>(region_limit);
-      
-      // Remove pages in batch (mode=2: clear bits in [from_page_id, to_page_id])
-      int ret = ModPageBitmap(2, region_start_page, region_end_page);
+#if defined(__linux__) && defined(MADV_FREE)
+      LOG(INFO) << "YYZ: Madvise region_space [" << std::hex
+                << reinterpret_cast<uintptr_t>(region_begin)
+                << ", " << reinterpret_cast<uintptr_t>(region_limit) << "]";
+      int ret = madvise(region_begin, region_limit - region_begin, MADV_FREE);
+      LOG(INFO) << "YYZ: madvise MADV_FREE PostFork region_space ret=" << ret
+                << " [" << std::hex << reinterpret_cast<uintptr_t>(region_begin)
+                << ", " << reinterpret_cast<uintptr_t>(region_limit) << "]";
       if (ret != 0) {
-        LOG(WARNING) << "YYZ: Failed to remove region_space pages [" 
-                     << region_start_page << ", " << region_end_page 
-                     << "], error: " << strerror(errno);
+        LOG(WARNING) << "YYZ: Failed to madvise region_space, error: " << strerror(errno);
       }
+#endif
     }
   }
 

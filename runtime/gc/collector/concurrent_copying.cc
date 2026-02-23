@@ -16,6 +16,8 @@
 
 #include "concurrent_copying.h"
 
+#include <sys/mman.h>
+
 #include "art_field-inl.h"
 #include "barrier.h"
 #include "base/enums.h"
@@ -1490,8 +1492,10 @@ void ConcurrentCopying::CopyingPhase() {
         continue;
       }
       if (heap_->GetFreePageBitmap()->TestBit(i)) {
-        // yizhe: remove the free page from the page bitmap in kernel
-        ModPageBitmap(2, i, i);
+#if defined(__linux__) && defined(MADV_FREE)
+        madvise(reinterpret_cast<void*>(page_addr), kPageSize, MADV_FREE);
+        LOG(INFO) << "YYZ: madvise MADV_FREE MarkingPhase page_addr=" << std::hex << page_addr << std::dec << " page_id=" << i;
+#endif
         page_count++;
       }
     }

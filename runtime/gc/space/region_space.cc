@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include <deque>
+#include <sys/mman.h>
 
 #include "bump_pointer_space-inl.h"
 #include "bump_pointer_space.h"
@@ -484,10 +485,11 @@ void RegionSpace::ClearFromSpace(/* out */ uint64_t* cleared_bytes,
   uint64_t start_time = NanoTime();
   for (const auto &iter : madvise_list) {
     ZeroAndProtectRegion(iter.first, iter.second);
-    // yizhe: clear the page bitmap in kernel (mode=2: clear bits in [from_page_id, to_page_id])
-    size_t start_page = CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(iter.first));
-    size_t end_page = CalculatePageId(art::GetMinHeapAddressBase(), reinterpret_cast<uintptr_t>(iter.second) - 1);
-    ModPageBitmap(2, start_page, end_page);
+#if defined(__linux__) && defined(MADV_FREE)
+    madvise(iter.first, iter.second - iter.first, MADV_FREE);
+    LOG(INFO) << "YYZ: madvise MADV_FREE ClearFromSpace [" << reinterpret_cast<uintptr_t>(iter.first)
+              << ", " << reinterpret_cast<uintptr_t>(iter.second) << "] len=" << (iter.second - iter.first);
+#endif
   }
   madvise_time_ += NanoTime() - start_time;
 
