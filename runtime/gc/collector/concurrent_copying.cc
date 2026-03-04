@@ -16,6 +16,7 @@
 
 #include "concurrent_copying.h"
 
+#include "android-base/logging.h"
 #include "art_field-inl.h"
 #include "barrier.h"
 #include "base/enums.h"
@@ -1486,12 +1487,13 @@ void ConcurrentCopying::CopyingPhase() {
          i++) {
       // Only process pages that belong to from-space regions.
       uintptr_t page_addr = base + i * kPageSize;
-      if (!region_space_->IsInFromSpace(reinterpret_cast<mirror::Object*>(page_addr))) {
+      if (!region_space_->IsInFromSpace(reinterpret_cast<mirror::Object*>(page_addr)) && !region_space_->IsInUnevacFromSpace(reinterpret_cast<mirror::Object*>(page_addr))) {
         continue;
       }
       if (heap_->GetFreePageBitmap()->TestBit(i)) {
         // yizhe: remove the free page from the page bitmap in kernel
         ModPageBitmap(2, i, i);
+        // madvise(reinterpret_cast<void*>(page_addr), kPageSize, 20);
         page_count++;
       }
     }
@@ -1499,6 +1501,12 @@ void ConcurrentCopying::CopyingPhase() {
     LOG(INFO) << "GC MarkingPhase: garbage_page_count=" << page_count
               << ", total_page_count=" << heap_->GetFreePageBitmap()->BitmapSize()
               << ", do_mark_elapsed_ms=" << (do_mark_elapsed_ns / 1000 / 1000);
+
+    // if (madvise(reinterpret_cast<void*>(region_space_->Begin()), region_space_->Limit() - region_space_->Begin(), 20) != 0) {
+    //   LOG(INFO) << "GC MarkingPhase: madvise cold failed: " << strerror(errno);
+    // } else {
+    //   LOG(INFO) << "GC MarkingPhase: madvise cold success";
+    // }
   }
 
   TimingLogger::ScopedTiming split("CopyingPhase", GetTimings());
