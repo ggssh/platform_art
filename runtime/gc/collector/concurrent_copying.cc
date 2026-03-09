@@ -211,6 +211,7 @@ ConcurrentCopying::~ConcurrentCopying() {
 void ConcurrentCopying::RunPhases() {
   CHECK(kUseBakerReadBarrier || kUseTableLookupReadBarrier);
   CHECK(!is_active_);
+  auto stt = NanoTime();
   is_active_ = true;
   Thread* self = Thread::Current();
   thread_running_gc_ = self;
@@ -262,6 +263,8 @@ void ConcurrentCopying::RunPhases() {
   CHECK(is_active_);
   is_active_ = false;
   thread_running_gc_ = nullptr;
+  auto ett = NanoTime();
+  LOG(INFO) << "YYZ: GC time: " << (ett - stt) / 1000000.0 << " ms";
 }
 
 class ConcurrentCopying::ActivateReadBarrierEntrypointsCheckpoint : public Closure {
@@ -1498,7 +1501,7 @@ void ConcurrentCopying::CopyingPhase() {
       }
     }
     const uint64_t do_mark_elapsed_ns = NanoTime() - do_mark_start_ns;
-    LOG(INFO) << "GC MarkingPhase: garbage_page_count=" << page_count
+    LOG(INFO) << "YYZ: GC MarkingPhase: garbage_page_count=" << page_count
               << ", total_page_count=" << heap_->GetFreePageBitmap()->BitmapSize()
               << ", do_mark_elapsed_ms=" << (do_mark_elapsed_ns / 1000 / 1000);
 
