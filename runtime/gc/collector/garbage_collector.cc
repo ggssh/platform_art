@@ -217,6 +217,16 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
     gc_throughput_histogram_->Add(throughput);
     gc_throughput_avg_->Add(throughput);
   }
+  // Log GC efficiency regardless of metrics initialization.
+  {
+    uint64_t tracing_mb_s = (current_iteration->GetScannedBytes() * 1'000'000)
+        / (NsToUs(duration_ns) + 1) / MB;
+    uint64_t freed_mb_s = current_iteration->GetEstimatedThroughput() / MB;
+    LOG(INFO) << "GC efficiency: " << GetName()
+              << " duration_ms=" << NsToMs(duration_ns)
+              << " tracing_MB_s=" << tracing_mb_s
+              << " freed_MB_s=" << freed_mb_s;
+  }
   is_transaction_active_ = false;
 }
 
